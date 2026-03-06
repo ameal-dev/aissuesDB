@@ -83,7 +83,9 @@ export function createDatabase(path: string): AissuesDB {
   `);
 
   const listByTagStmt = db.prepare(`
-    SELECT * FROM issues WHERE tags LIKE ? ORDER BY created_at DESC LIMIT ?
+    SELECT * FROM issues WHERE EXISTS (
+      SELECT 1 FROM json_each(issues.tags) WHERE json_each.value = ?
+    ) ORDER BY created_at DESC LIMIT ?
   `);
 
   function generateId(): string {
@@ -100,24 +102,25 @@ export function createDatabase(path: string): AissuesDB {
     };
   }
 
+  const insertBoth = db.transaction((id: string, input: IssueInput, embedding: Float32Array) => {
+    insertIssueStmt.run(
+      id,
+      input.title,
+      input.symptom,
+      input.root_cause,
+      input.fix,
+      JSON.stringify(input.failed_approaches),
+      input.attempts,
+      JSON.stringify(input.tags),
+      input.source_project
+    );
+    insertVecStmt.run(id, embedding);
+  });
+
   return {
     insertIssue(input: IssueInput, embedding: Float32Array): string {
       const id = generateId();
-      const insertBoth = db.transaction(() => {
-        insertIssueStmt.run(
-          id,
-          input.title,
-          input.symptom,
-          input.root_cause,
-          input.fix,
-          JSON.stringify(input.failed_approaches),
-          input.attempts,
-          JSON.stringify(input.tags),
-          input.source_project
-        );
-        insertVecStmt.run(id, embedding);
-      });
-      insertBoth();
+      insertBoth(id, input, embedding);
       return id;
     },
 
@@ -133,15 +136,17 @@ export function createDatabase(path: string): AissuesDB {
       const placeholders = ids.map(() => "?").join(",");
       const issueRows = db.prepare(`SELECT * FROM issues WHERE id IN (${placeholders})`).all(...ids) as any[];
       const issueMap = new Map(issueRows.map((r) => [r.id, r]));
-      return vecRows.map((vr) => ({
-        ...parseIssueRow(issueMap.get(vr.id)),
-        distance: vr.distance,
-      }));
+      return vecRows
+        .filter((vr) => issueMap.has(vr.id))
+        .map((vr) => ({
+          ...parseIssueRow(issueMap.get(vr.id)!),
+          distance: vr.distance,
+        }));
     },
 
     listIssues(tag: string | undefined, limit: number): Issue[] {
       const rows = tag
-        ? (listByTagStmt.all(`%"${tag}"%`, limit) as any[])
+        ? (listByTagStmt.all(tag, limit) as any[])
         : (listAllStmt.all(limit) as any[]);
       return rows.map(parseIssueRow);
     },
