@@ -74,21 +74,39 @@ function parseKnownIssues(markdown: string): ParsedIssue[] {
   return issues;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function main() {
   console.error(`Reading known issues from: ${knownIssuesPath}`);
   const markdown = readFileSync(knownIssuesPath, "utf-8");
   const issues = parseKnownIssues(markdown);
   console.error(`Parsed ${issues.length} issues`);
 
+  // Delete existing DB for clean seed
+  const { unlinkSync, existsSync } = await import("node:fs");
+  if (existsSync(dbPath)) {
+    unlinkSync(dbPath);
+    console.error("Deleted existing database for clean seed");
+  }
+
   const db = createDatabase(dbPath);
   const embedder = createEmbeddingClient();
 
-  for (const issue of issues) {
+  for (let i = 0; i < issues.length; i++) {
+    const issue = issues[i];
     const text = buildEmbeddingText(issue);
-    console.error(`Generating embedding for: ${issue.title}`);
+    console.error(`[${i + 1}/${issues.length}] Generating embedding for: ${issue.title}`);
     const embedding = await embedder.embed(text);
     const id = db.insertIssue(issue, embedding);
     console.error(`  Inserted as ${id}`);
+
+    // Rate limit: free tier is 3 RPM, so wait 21s between calls
+    if (i < issues.length - 1) {
+      console.error("  Waiting 21s for rate limit...");
+      await sleep(21000);
+    }
   }
 
   console.error("Seed complete!");
